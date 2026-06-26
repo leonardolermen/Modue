@@ -2,6 +2,11 @@
   "serialPort": "auto",
   "baud": 115200,
 
+  "spotify": {
+    "clientId": "5ee610458f974597ba5c5f96eab539b5",
+    "redirectUri": "http://127.0.0.1:8888/callback"
+  },
+
   "discordProcess": "Discord.exe",
 
   "keybinds": {

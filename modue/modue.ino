@@ -2,8 +2,9 @@
 //  Mixer Modular Magnético — Firmware dinâmico (controlado pelo PC)
 //  Placa: SpotPear/Waveshare ESP32-C6-Touch-LCD-1.47 (JD9853 + AXS5106L)
 //
-//  Renderizador genérico: o PC manda comandos (VOL/STATE/COLOR) e o
-//  módulo devolve eventos (EV VOL/EV BTN). Ver PROTOCOL.md.
+//  Renderizador genérico com telas trocáveis (Discord / Spotify).
+//  PC manda comandos (SCREEN/VOL/STATE/COLOR/LABEL); módulo devolve
+//  eventos (EV VOL / EV BTN). Ver PROTOCOL.md.
 //
 //  Libs: GFX Library for Arduino, lvgl 8.4, esp_lcd_touch_axs5106l
 //  Board: ESP32C6 Dev Module | USB CDC On Boot: Enabled
@@ -13,9 +14,9 @@
 #include <Arduino_GFX_Library.h>
 #include <Wire.h>
 #include "esp_lcd_touch_axs5106l.h"
-#include "icons.h"  // logo padrao (default ate o PC mandar imagem)
+#include "icons.h"  // img_discord, img_mic, img_mic_muted (defaults)
 
-#define FW_VERSION "0.2.0"
+#define FW_VERSION "0.3.0"
 
 // ---- Display JD9853 ----
 #define GFX_BL 23
@@ -35,7 +36,10 @@ Arduino_GFX *gfx = new Arduino_ST7789(bus, 22, 0, false, 172, 320, 34, 0, 34, 0)
 #define C_BTN_MUTE 0x2b1417
 #define C_RED      0xe24b4a
 #define C_LIGHT    0xcfd2da
-static uint32_t accent = 0x5865F2;  // mutavel via COLOR
+static uint32_t accent = 0x5865F2;
+
+// Tipos no topo (o Arduino gera protótipos antes das declarações abaixo)
+enum Screen { SCR_DISCORD, SCR_SPOTIFY };
 
 // ---- Init proprio do JD9853 ----
 void lcd_reg_init(void) {
@@ -87,8 +91,7 @@ static lv_color_t *buf1;
 static lv_disp_drv_t disp_drv;
 
 void my_disp_flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_p) {
-  uint32_t w = area->x2 - area->x1 + 1;
-  uint32_t h = area->y2 - area->y1 + 1;
+  uint32_t w = area->x2 - area->x1 + 1, h = area->y2 - area->y1 + 1;
 #if (LV_COLOR_16_SWAP != 0)
   gfx->draw16bitBeRGBBitmap(area->x1, area->y1, (uint16_t *)&color_p->full, w, h);
 #else
@@ -104,109 +107,134 @@ void touchpad_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
     data->point.x = td.coords[0].x;
     data->point.y = td.coords[0].y;
     data->state = LV_INDEV_STATE_PRESSED;
-  } else {
-    data->state = LV_INDEV_STATE_RELEASED;
-  }
+  } else data->state = LV_INDEV_STATE_RELEASED;
 }
 
-// ---- Serial helper (nunca bloqueia) ----
 void txln(const char *s) {
   if (Serial && Serial.availableForWrite() > (int)strlen(s) + 2) Serial.println(s);
 }
 
-// ---- Widgets globais ----
-static lv_obj_t *slider, *volLabel, *micBtn, *foneBtn, *micImg, *foneLbl;
-static bool suppressEv = false;  // true quando o PC altera (nao gerar EV)
+// ---- Estado / widgets ----
+static Screen current = SCR_DISCORD;
+static bool suppressEv = false;
 
-// ---- Eventos do usuario -> PC ----
+static lv_obj_t *slider, *volLabel;          // comuns
+static lv_obj_t *micBtn, *micImg, *foneBtn, *foneLbl;  // discord
+static lv_obj_t *trackLabel, *prevBtn, *playBtn, *playLbl, *nextBtn, *artImg;  // spotify
+
+// Buffer/descritor da capa do album (recebida via comando IMG)
+#define MAX_ART 40000  // 140*140*2 = 39200
+static uint8_t *artBuf = NULL;
+static lv_img_dsc_t artDsc;
+// Recepcao de imagem nao-bloqueante (le os bytes aos poucos no loop)
+static int imgW = 0, imgH = 0;
+static size_t imgRemaining = 0, imgPos = 0;
+static uint32_t imgLast = 0;  // pra timeout
+
+// ---- Eventos comuns ----
 static void slider_event_cb(lv_event_t *e) {
   int v = lv_slider_get_value(slider);
   lv_label_set_text_fmt(volLabel, "%d", v);
   if (suppressEv) return;
-  static uint32_t lastTx = 0;
-  static int lastV = -1;
+  static uint32_t lastTx = 0; static int lastV = -1;
   bool released = (lv_event_get_code(e) == LV_EVENT_RELEASED);
   uint32_t now = millis();
   if (v != lastV && (released || now - lastTx > 80)) {
-    char b[16]; snprintf(b, sizeof(b), "EV VOL %d", v);
-    txln(b); lastTx = now; lastV = v;
+    char b[16]; snprintf(b, sizeof(b), "EV VOL %d", v); txln(b); lastTx = now; lastV = v;
   }
 }
 
+// ---- Eventos Discord ----
 static void mic_event_cb(lv_event_t *e) {
-  bool muted = lv_obj_has_state(micBtn, LV_STATE_CHECKED);
-  lv_img_set_src(micImg, muted ? &img_mic_muted : &img_mic);
-  if (!suppressEv) { char b[20]; snprintf(b, sizeof(b), "EV BTN mic %d", muted); txln(b); }
+  bool m = lv_obj_has_state(micBtn, LV_STATE_CHECKED);
+  lv_img_set_src(micImg, m ? &img_mic_muted : &img_mic);
+  if (!suppressEv) { char b[20]; snprintf(b, sizeof(b), "EV BTN mic %d", m); txln(b); }
 }
-
 static void fone_event_cb(lv_event_t *e) {
-  bool muted = lv_obj_has_state(foneBtn, LV_STATE_CHECKED);
-  lv_label_set_text(foneLbl, muted ? LV_SYMBOL_MUTE : LV_SYMBOL_VOLUME_MAX);
-  lv_obj_set_style_text_color(foneLbl, lv_color_hex(muted ? C_RED : C_LIGHT), 0);
-  if (!suppressEv) { char b[20]; snprintf(b, sizeof(b), "EV BTN deaf %d", muted); txln(b); }
+  bool m = lv_obj_has_state(foneBtn, LV_STATE_CHECKED);
+  lv_label_set_text(foneLbl, m ? LV_SYMBOL_MUTE : LV_SYMBOL_VOLUME_MAX);
+  lv_obj_set_style_text_color(foneLbl, lv_color_hex(m ? C_RED : C_LIGHT), 0);
+  if (!suppressEv) { char b[20]; snprintf(b, sizeof(b), "EV BTN deaf %d", m); txln(b); }
 }
 
-static void style_btn(lv_obj_t *btn, int x) {
-  lv_obj_set_size(btn, 64, 64);
-  lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, x, -12);
-  lv_obj_add_flag(btn, LV_OBJ_FLAG_CHECKABLE);
-  lv_obj_set_style_radius(btn, 16, 0);
-  lv_obj_set_style_bg_color(btn, lv_color_hex(C_BTN), 0);
-  lv_obj_set_style_border_width(btn, 0, 0);
-  lv_obj_set_style_shadow_width(btn, 0, 0);
-  lv_obj_set_style_pad_all(btn, 0, 0);
-  lv_obj_set_style_bg_color(btn, lv_color_hex(C_BTN_MUTE), LV_STATE_CHECKED);
-  lv_obj_set_style_border_width(btn, 1, LV_STATE_CHECKED);
-  lv_obj_set_style_border_color(btn, lv_color_hex(C_RED), LV_STATE_CHECKED);
+// ---- Eventos Spotify ----
+static void transport_cb(lv_event_t *e) {
+  const char *id = (const char *)lv_event_get_user_data(e);
+  lv_obj_t *btn = lv_event_get_target(e);
+  if (!strcmp(id, "play")) {
+    bool playing = lv_obj_has_state(btn, LV_STATE_CHECKED);
+    lv_label_set_text(playLbl, playing ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+    if (!suppressEv) { char b[20]; snprintf(b, sizeof(b), "EV BTN play %d", playing); txln(b); }
+  } else if (!suppressEv) {
+    char b[20]; snprintf(b, sizeof(b), "EV BTN %s 1", id); txln(b);
+  }
 }
 
-void build_ui() {
-  lv_obj_t *scr = lv_scr_act();
-  lv_obj_set_style_bg_color(scr, lv_color_hex(C_BG), 0);
-  lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+// ---- Helpers de estilo ----
+static lv_obj_t *common_slider(lv_obj_t *scr, int y) {
+  lv_obj_t *s = lv_slider_create(scr);
+  lv_obj_set_size(s, 140, 22);
+  lv_obj_align(s, LV_ALIGN_TOP_MID, 0, y);
+  lv_slider_set_range(s, 0, 100);
+  lv_slider_set_value(s, 50, LV_ANIM_OFF);
+  lv_obj_set_style_bg_color(s, lv_color_hex(C_TRACK), LV_PART_MAIN);
+  lv_obj_set_style_radius(s, 11, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(s, lv_color_hex(accent), LV_PART_INDICATOR);
+  lv_obj_set_style_radius(s, 11, LV_PART_INDICATOR);
+  lv_obj_set_style_bg_color(s, lv_color_hex(0xffffff), LV_PART_KNOB);
+  lv_obj_set_style_pad_all(s, 4, LV_PART_KNOB);
+  lv_obj_add_event_cb(s, slider_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  lv_obj_add_event_cb(s, slider_event_cb, LV_EVENT_RELEASED, NULL);
+  return s;
+}
 
+// ---- Tela Discord ----
+static void disc_btn_style(lv_obj_t *b, int x) {
+  lv_obj_set_size(b, 64, 64);
+  lv_obj_align(b, LV_ALIGN_BOTTOM_MID, x, -12);
+  lv_obj_add_flag(b, LV_OBJ_FLAG_CHECKABLE);
+  lv_obj_set_style_radius(b, 16, 0);
+  lv_obj_set_style_bg_color(b, lv_color_hex(C_BTN), 0);
+  lv_obj_set_style_border_width(b, 0, 0);
+  lv_obj_set_style_shadow_width(b, 0, 0);
+  lv_obj_set_style_pad_all(b, 0, 0);
+  lv_obj_set_style_bg_color(b, lv_color_hex(C_BTN_MUTE), LV_STATE_CHECKED);
+  lv_obj_set_style_border_width(b, 1, LV_STATE_CHECKED);
+  lv_obj_set_style_border_color(b, lv_color_hex(C_RED), LV_STATE_CHECKED);
+}
+
+void build_discord(lv_obj_t *scr) {
   lv_obj_t *logo = lv_obj_create(scr);
   lv_obj_set_size(logo, 132, 132);
   lv_obj_align(logo, LV_ALIGN_TOP_MID, 0, 8);
   lv_obj_set_style_radius(logo, 30, 0);
   lv_obj_set_style_clip_corner(logo, true, 0);
-  lv_obj_set_style_bg_color(logo, lv_color_hex(accent), 0);
+  lv_obj_set_style_bg_color(logo, lv_color_hex(0x5865F2), 0);
   lv_obj_set_style_border_width(logo, 0, 0);
   lv_obj_set_style_pad_all(logo, 0, 0);
   lv_obj_clear_flag(logo, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_t *logoImg = lv_img_create(logo);
-  lv_img_set_src(logoImg, &img_discord);
-  lv_obj_center(logoImg);
+  lv_obj_t *li = lv_img_create(logo);
+  lv_img_set_src(li, &img_discord);
+  lv_obj_center(li);
 
-  slider = lv_slider_create(scr);
-  lv_obj_set_size(slider, 140, 24);
-  lv_obj_align(slider, LV_ALIGN_TOP_MID, 0, 152);
-  lv_slider_set_range(slider, 0, 100);
+  slider = common_slider(scr, 152);
   lv_slider_set_value(slider, 72, LV_ANIM_OFF);
-  lv_obj_set_style_bg_color(slider, lv_color_hex(C_TRACK), LV_PART_MAIN);
-  lv_obj_set_style_radius(slider, 12, LV_PART_MAIN);
-  lv_obj_set_style_bg_color(slider, lv_color_hex(accent), LV_PART_INDICATOR);
-  lv_obj_set_style_radius(slider, 12, LV_PART_INDICATOR);
-  lv_obj_set_style_bg_color(slider, lv_color_hex(0xffffff), LV_PART_KNOB);
-  lv_obj_set_style_pad_all(slider, 4, LV_PART_KNOB);
-  lv_obj_add_event_cb(slider, slider_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
-  lv_obj_add_event_cb(slider, slider_event_cb, LV_EVENT_RELEASED, NULL);
 
   volLabel = lv_label_create(scr);
   lv_label_set_text(volLabel, "72");
   lv_obj_set_style_text_color(volLabel, lv_color_hex(0xffffff), 0);
   lv_obj_set_style_text_font(volLabel, &lv_font_montserrat_40, 0);
-  lv_obj_align(volLabel, LV_ALIGN_TOP_MID, 0, 184);
+  lv_obj_align(volLabel, LV_ALIGN_TOP_MID, 0, 182);
 
   micBtn = lv_btn_create(scr);
-  style_btn(micBtn, -36);
+  disc_btn_style(micBtn, -36);
   micImg = lv_img_create(micBtn);
   lv_img_set_src(micImg, &img_mic);
   lv_obj_center(micImg);
   lv_obj_add_event_cb(micBtn, mic_event_cb, LV_EVENT_CLICKED, NULL);
 
   foneBtn = lv_btn_create(scr);
-  style_btn(foneBtn, 36);
+  disc_btn_style(foneBtn, 36);
   foneLbl = lv_label_create(foneBtn);
   lv_label_set_text(foneLbl, LV_SYMBOL_VOLUME_MAX);
   lv_obj_set_style_text_color(foneLbl, lv_color_hex(C_LIGHT), 0);
@@ -215,63 +243,181 @@ void build_ui() {
   lv_obj_add_event_cb(foneBtn, fone_event_cb, LV_EVENT_CLICKED, NULL);
 }
 
-// ---- Aplica comandos do PC (sem gerar EV) ----
-void setStateBtn(lv_obj_t *btn, bool on) {
+// ---- Tela Spotify ----
+static lv_obj_t *transport_btn(lv_obj_t *scr, const char *sym, int x, int sz,
+                               bool checkable, const char *id) {
+  lv_obj_t *b = lv_btn_create(scr);
+  lv_obj_set_size(b, sz, sz);
+  lv_obj_align(b, LV_ALIGN_BOTTOM_MID, x, -14);
+  lv_obj_set_style_radius(b, sz / 2, 0);  // redondo
+  lv_obj_set_style_bg_color(b, lv_color_hex(checkable ? accent : C_BTN), 0);
+  lv_obj_set_style_border_width(b, 0, 0);
+  lv_obj_set_style_shadow_width(b, 0, 0);
+  lv_obj_set_style_pad_all(b, 0, 0);
+  if (checkable) {
+    lv_obj_add_flag(b, LV_OBJ_FLAG_CHECKABLE);
+    lv_obj_set_style_bg_color(b, lv_color_hex(accent), LV_STATE_CHECKED);
+  }
+  lv_obj_t *l = lv_label_create(b);
+  lv_label_set_text(l, sym);
+  lv_obj_set_style_text_color(l, lv_color_hex(0xffffff), 0);
+  lv_obj_set_style_text_font(l, &lv_font_montserrat_20, 0);
+  lv_obj_center(l);
+  lv_obj_add_event_cb(b, transport_cb, LV_EVENT_CLICKED, (void *)id);
+  if (!strcmp(id, "play")) playLbl = l;
+  return b;
+}
+
+void build_spotify(lv_obj_t *scr) {
+  // Capa do album: container arredondado (clip) + imagem preenchida via IMG
+  lv_obj_t *art = lv_obj_create(scr);
+  lv_obj_set_size(art, 140, 140);
+  lv_obj_align(art, LV_ALIGN_TOP_MID, 0, 8);
+  lv_obj_set_style_radius(art, 16, 0);
+  lv_obj_set_style_clip_corner(art, true, 0);
+  lv_obj_set_style_bg_color(art, lv_color_hex(0x1f2430), 0);
+  lv_obj_set_style_border_width(art, 0, 0);
+  lv_obj_set_style_pad_all(art, 0, 0);
+  lv_obj_clear_flag(art, LV_OBJ_FLAG_SCROLLABLE);
+  artImg = lv_img_create(art);
+  lv_obj_center(artImg);
+  if (artBuf && artDsc.data) lv_img_set_src(artImg, &artDsc);  // reusa ultima capa
+
+  // Nome da faixa (rola se for grande)
+  trackLabel = lv_label_create(scr);
+  lv_label_set_long_mode(trackLabel, LV_LABEL_LONG_SCROLL_CIRCULAR);
+  lv_obj_set_width(trackLabel, 164);
+  lv_label_set_text(trackLabel, "—");
+  lv_obj_set_style_text_align(trackLabel, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_style_text_color(trackLabel, lv_color_hex(0xffffff), 0);
+  lv_obj_set_style_text_font(trackLabel, &lv_font_montserrat_14, 0);
+  lv_obj_align(trackLabel, LV_ALIGN_TOP_MID, 0, 156);
+
+  slider = common_slider(scr, 192);  // fader mais pra baixo
+  volLabel = lv_label_create(scr);
+  lv_obj_add_flag(volLabel, LV_OBJ_FLAG_HIDDEN);
+
+  // Transporte: anterior · play/pause · proxima
+  prevBtn = transport_btn(scr, LV_SYMBOL_PREV, -56, 48, false, "prev");
+  playBtn = transport_btn(scr, LV_SYMBOL_PLAY, 0, 58, true, "play");
+  nextBtn = transport_btn(scr, LV_SYMBOL_NEXT, 56, 48, false, "next");
+}
+
+// ---- Troca de tela ----
+void switch_screen(Screen s) {
+  lv_obj_t *scr = lv_scr_act();
+  lv_obj_clean(scr);
+  micBtn = foneBtn = micImg = foneLbl = NULL;
+  trackLabel = prevBtn = playBtn = playLbl = nextBtn = artImg = NULL;
+  lv_obj_set_style_bg_color(scr, lv_color_hex(C_BG), 0);
+  lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+  current = s;
+  if (s == SCR_SPOTIFY) build_spotify(scr); else build_discord(scr);
+  txln(s == SCR_SPOTIFY ? "DBG screen=spotify" : "DBG screen=discord");
+}
+
+// ---- Aplica STATE do PC (sem gerar EV) ----
+void setChecked(lv_obj_t *btn, bool on) {
+  if (!btn) return;
   suppressEv = true;
   if (on) lv_obj_add_state(btn, LV_STATE_CHECKED);
   else lv_obj_clear_state(btn, LV_STATE_CHECKED);
-  lv_event_send(btn, LV_EVENT_CLICKED, NULL);  // atualiza icone/cor
+  lv_event_send(btn, LV_EVENT_CLICKED, NULL);
   suppressEv = false;
 }
 
-void applyColor(uint32_t rgb) {
-  accent = rgb;
-  lv_obj_set_style_bg_color(slider, lv_color_hex(accent), LV_PART_INDICATOR);
-}
-
-// ---- Parser de comandos serial ----
-static char lineBuf[96];
+// ---- Parser de comandos ----
+static char lineBuf[160];
 static uint8_t lineLen = 0;
 
 void handleCommand(char *s) {
   if (!strcmp(s, "PING")) { txln("PONG"); return; }
 
+  if (!strncmp(s, "SCREEN ", 7)) {
+    if (!strcmp(s + 7, "spotify")) switch_screen(SCR_SPOTIFY);
+    else switch_screen(SCR_DISCORD);
+    return;
+  }
   if (!strncmp(s, "VOL ", 4)) {
     int v = constrain(atoi(s + 4), 0, 100);
     suppressEv = true;
-    lv_slider_set_value(slider, v, LV_ANIM_OFF);
-    lv_label_set_text_fmt(volLabel, "%d", v);
+    if (slider) lv_slider_set_value(slider, v, LV_ANIM_OFF);
+    if (volLabel) lv_label_set_text_fmt(volLabel, "%d", v);
     suppressEv = false;
     return;
   }
   if (!strncmp(s, "STATE ", 6)) {
-    char which[8]; int on = 0;
-    if (sscanf(s + 6, "%7s %d", which, &on) == 2) {
-      if (!strcmp(which, "mic")) setStateBtn(micBtn, on);
-      else if (!strcmp(which, "deaf")) setStateBtn(foneBtn, on);
+    char w[8]; int on = 0;
+    if (sscanf(s + 6, "%7s %d", w, &on) == 2) {
+      if (!strcmp(w, "mic")) setChecked(micBtn, on);
+      else if (!strcmp(w, "deaf")) setChecked(foneBtn, on);
+      else if (!strcmp(w, "play")) setChecked(playBtn, on);
+    }
+    return;
+  }
+  if (!strncmp(s, "LABEL ", 6)) {
+    if (trackLabel) { lv_label_set_text(trackLabel, s + 6); txln("DBG label=set"); }
+    else txln("DBG label=NULL-trackLabel");
+    return;
+  }
+  if (!strncmp(s, "IMG ", 4)) {
+    char slot[8]; int w = 0, h = 0;
+    if (sscanf(s + 4, "%7s %d %d", slot, &w, &h) == 3) {
+      size_t n = (size_t)w * h * 2;
+      if (!artBuf) artBuf = (uint8_t *)malloc(MAX_ART);
+      if (artBuf && n > 0 && n <= MAX_ART) {
+        // arma o modo recepcao; os bytes sao lidos no loop (sem bloquear)
+        imgW = w; imgH = h; imgRemaining = n; imgPos = 0; imgLast = millis();
+        txln(artImg ? "DBG img=arm" : "DBG img=arm-NULL-artImg");
+      } else txln("DBG img=rejeitado");
     }
     return;
   }
   if (!strncmp(s, "COLOR ", 6)) {
-    uint32_t rgb = (uint32_t)strtol(s + 6, NULL, 16);
-    applyColor(rgb);
+    accent = (uint32_t)strtol(s + 6, NULL, 16);
+    if (slider) lv_obj_set_style_bg_color(slider, lv_color_hex(accent), LV_PART_INDICATOR);
     return;
   }
-  // comandos desconhecidos: ignora
+}
+
+void finishImage() {
+  artDsc.header.cf = LV_IMG_CF_TRUE_COLOR;
+  artDsc.header.always_zero = 0;
+  artDsc.header.reserved = 0;
+  artDsc.header.w = imgW;
+  artDsc.header.h = imgH;
+  artDsc.data_size = (size_t)imgW * imgH * 2;
+  artDsc.data = artBuf;
+  if (artImg) { lv_img_set_src(artImg, &artDsc); lv_obj_invalidate(artImg); }
+  txln(artImg ? "DBG img=done" : "DBG img=done-NULL-artImg");
 }
 
 void pollSerial() {
+  // Modo recepcao de imagem: consome bytes crus, sem bloquear o loop
+  if (imgRemaining > 0) {
+    bool got = false;
+    while (Serial.available() && imgRemaining > 0) {
+      artBuf[imgPos++] = (uint8_t)Serial.read();
+      imgRemaining--;
+      got = true;
+    }
+    if (got) imgLast = millis();
+    if (imgRemaining == 0) finishImage();
+    else if (millis() - imgLast > 1500) { imgRemaining = 0; txln("DBG img=timeout"); }
+    return;
+  }
+  // Modo linha (comandos de texto)
   while (Serial.available()) {
     char c = Serial.read();
     if (c == '\n' || c == '\r') {
       if (lineLen > 0) { lineBuf[lineLen] = 0; handleCommand(lineBuf); lineLen = 0; }
-    } else if (lineLen < sizeof(lineBuf) - 1) {
-      lineBuf[lineLen++] = c;
-    }
+      if (imgRemaining > 0) return;  // entrou em modo imagem; le os bytes na proxima passada
+    } else if (lineLen < sizeof(lineBuf) - 1) lineBuf[lineLen++] = c;
   }
 }
 
 void setup() {
+  Serial.setRxBufferSize(MAX_ART + 2048);  // segura o jorro da imagem sem perder bytes
   Serial.begin(115200);
   delay(300);
 
@@ -304,12 +450,14 @@ void setup() {
   indev_drv.read_cb = touchpad_read_cb;
   lv_indev_drv_register(&indev_drv);
 
-  build_ui();
+  switch_screen(SCR_DISCORD);
   txln("HELLO modue " FW_VERSION);
 }
 
 void loop() {
   pollSerial();
+  // Enquanto recebe a imagem, drena rapido (sem desenhar) pra nao perder bytes.
+  if (imgRemaining > 0) return;
   lv_timer_handler();
   delay(5);
 }

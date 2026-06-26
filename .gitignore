@@ -14,6 +14,8 @@ build/
 
 # Node (app do PC)
 node_modules/
+.spotify-tokens.json
+app/.spotify-tokens.json
 app/svcl.exe
 
 # Temp
