@@ -1,0 +1,15 @@
+{
+  "serialPort": "auto",
+  "baud": 115200,
+
+  "discordProcess": "Discord.exe",
+
+  "keybinds": {
+    "mute":   { "key": "m", "ctrl": true, "alt": true, "shift": false, "meta": true },
+    "deafen": { "key": "d", "ctrl": true, "alt": true, "shift": false, "meta": true }
+  },
+
+  "windows": {
+    "svclPath": "svcl.exe"
+  }
+}

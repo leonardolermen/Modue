@@ -1,0 +1,14 @@
+{
+  "name": "modue-pc",
+  "version": "0.1.0",
+  "description": "Ponte PC <-> modulo Modue: le eventos do fader/botoes via serial e aplica no Discord (mute, deafen, volume).",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@serialport/parser-readline": "^12.0.0",
+    "serialport": "^12.0.0"
+  }
+}

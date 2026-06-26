@@ -1,14 +1,11 @@
 // ============================================================
-//  Mixer Modular Magnético — Tela Discord (LVGL)
-//  Placa: SpotPear/Waveshare ESP32-C6-Touch-LCD-1.47
-//  Display JD9853 172x320 | Touch AXS5106L
+//  Mixer Modular Magnético — Firmware dinâmico (controlado pelo PC)
+//  Placa: SpotPear/Waveshare ESP32-C6-Touch-LCD-1.47 (JD9853 + AXS5106L)
 //
-//  UI: marca Discord + fader vertical touch + botoes mute mic/fone.
-//  O slider e os botoes mandam eventos no Serial (VOL / MUTE_*),
-//  prontos pra ligar no app do PC depois.
+//  Renderizador genérico: o PC manda comandos (VOL/STATE/COLOR) e o
+//  módulo devolve eventos (EV VOL/EV BTN). Ver PROTOCOL.md.
 //
 //  Libs: GFX Library for Arduino, lvgl 8.4, esp_lcd_touch_axs5106l
-//  (lv_conf.h ja instalado em ~/Documents/Arduino/libraries/)
 //  Board: ESP32C6 Dev Module | USB CDC On Boot: Enabled
 // ============================================================
 
@@ -16,12 +13,14 @@
 #include <Arduino_GFX_Library.h>
 #include <Wire.h>
 #include "esp_lcd_touch_axs5106l.h"
-#include "icons.h"  // img_discord, img_mic, img_mic_muted
+#include "icons.h"  // logo padrao (default ate o PC mandar imagem)
+
+#define FW_VERSION "0.2.0"
 
 // ---- Display JD9853 ----
 #define GFX_BL 23
-Arduino_DataBus *bus = new Arduino_HWSPI(15 /* DC */, 14 /* CS */, 1 /* SCK */, 2 /* MOSI */);
-Arduino_GFX *gfx = new Arduino_ST7789(bus, 22 /* RST */, 0, false, 172, 320, 34, 0, 34, 0);
+Arduino_DataBus *bus = new Arduino_HWSPI(15, 14, 1, 2);
+Arduino_GFX *gfx = new Arduino_ST7789(bus, 22, 0, false, 172, 320, 34, 0, 34, 0);
 
 // ---- Touch AXS5106L ----
 #define TP_SDA 18
@@ -31,14 +30,14 @@ Arduino_GFX *gfx = new Arduino_ST7789(bus, 22 /* RST */, 0, false, 172, 320, 34,
 
 // ---- Cores ----
 #define C_BG       0x0a0b10
-#define C_BLURPLE  0x5865F2
 #define C_TRACK    0x1c1f29
 #define C_BTN      0x15171f
 #define C_BTN_MUTE 0x2b1417
 #define C_RED      0xe24b4a
 #define C_LIGHT    0xcfd2da
+static uint32_t accent = 0x5865F2;  // mutavel via COLOR
 
-// ---- Init proprio do JD9853 (demo oficial Waveshare) ----
+// ---- Init proprio do JD9853 ----
 void lcd_reg_init(void) {
   static const uint8_t op[] = {
     BEGIN_WRITE, WRITE_COMMAND_8, 0x11, END_WRITE, DELAY, 120,
@@ -110,29 +109,42 @@ void touchpad_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
   }
 }
 
-// ---- UI ----
-static lv_obj_t *volLabel;
+// ---- Serial helper (nunca bloqueia) ----
+void txln(const char *s) {
+  if (Serial && Serial.availableForWrite() > (int)strlen(s) + 2) Serial.println(s);
+}
 
+// ---- Widgets globais ----
+static lv_obj_t *slider, *volLabel, *micBtn, *foneBtn, *micImg, *foneLbl;
+static bool suppressEv = false;  // true quando o PC altera (nao gerar EV)
+
+// ---- Eventos do usuario -> PC ----
 static void slider_event_cb(lv_event_t *e) {
-  lv_obj_t *s = lv_event_get_target(e);
-  int v = lv_slider_get_value(s);
-  lv_label_set_text_fmt(volLabel, "%d", v);  // tela: atualiza sempre (barato)
-
-  // Serial: throttle pra nao floodar o USB CDC e travar o loop.
-  // Imprime no maximo a cada 80ms, e sempre o valor final ao soltar.
+  int v = lv_slider_get_value(slider);
+  lv_label_set_text_fmt(volLabel, "%d", v);
+  if (suppressEv) return;
   static uint32_t lastTx = 0;
   static int lastV = -1;
   bool released = (lv_event_get_code(e) == LV_EVENT_RELEASED);
   uint32_t now = millis();
-  // Serial && availableForWrite: nunca bloqueia se o Monitor estiver fechado
-  if (Serial && Serial.availableForWrite() > 16 && v != lastV && (released || now - lastTx > 80)) {
-    Serial.printf("VOL %d\n", v);
-    lastTx = now;
-    lastV = v;
+  if (v != lastV && (released || now - lastTx > 80)) {
+    char b[16]; snprintf(b, sizeof(b), "EV VOL %d", v);
+    txln(b); lastTx = now; lastV = v;
   }
 }
 
-static lv_obj_t *micImg;  // pra trocar a imagem do mic ao mutar
+static void mic_event_cb(lv_event_t *e) {
+  bool muted = lv_obj_has_state(micBtn, LV_STATE_CHECKED);
+  lv_img_set_src(micImg, muted ? &img_mic_muted : &img_mic);
+  if (!suppressEv) { char b[20]; snprintf(b, sizeof(b), "EV BTN mic %d", muted); txln(b); }
+}
+
+static void fone_event_cb(lv_event_t *e) {
+  bool muted = lv_obj_has_state(foneBtn, LV_STATE_CHECKED);
+  lv_label_set_text(foneLbl, muted ? LV_SYMBOL_MUTE : LV_SYMBOL_VOLUME_MAX);
+  lv_obj_set_style_text_color(foneLbl, lv_color_hex(muted ? C_RED : C_LIGHT), 0);
+  if (!suppressEv) { char b[20]; snprintf(b, sizeof(b), "EV BTN deaf %d", muted); txln(b); }
+}
 
 static void style_btn(lv_obj_t *btn, int x) {
   lv_obj_set_size(btn, 64, 64);
@@ -143,60 +155,22 @@ static void style_btn(lv_obj_t *btn, int x) {
   lv_obj_set_style_border_width(btn, 0, 0);
   lv_obj_set_style_shadow_width(btn, 0, 0);
   lv_obj_set_style_pad_all(btn, 0, 0);
-  // estado mutado (checked): fundo vermelho-escuro + borda vermelha
   lv_obj_set_style_bg_color(btn, lv_color_hex(C_BTN_MUTE), LV_STATE_CHECKED);
   lv_obj_set_style_border_width(btn, 1, LV_STATE_CHECKED);
   lv_obj_set_style_border_color(btn, lv_color_hex(C_RED), LV_STATE_CHECKED);
 }
 
-static void mic_event_cb(lv_event_t *e) {
-  lv_obj_t *btn = lv_event_get_target(e);
-  bool muted = lv_obj_has_state(btn, LV_STATE_CHECKED);
-  lv_img_set_src(micImg, muted ? &img_mic_muted : &img_mic);
-  if (Serial && Serial.availableForWrite() > 16) Serial.printf("MUTE_MIC %s\n", muted ? "on" : "off");
-}
-
-static void fone_event_cb(lv_event_t *e) {
-  lv_obj_t *btn = lv_event_get_target(e);
-  bool muted = lv_obj_has_state(btn, LV_STATE_CHECKED);
-  lv_obj_t *lbl = lv_obj_get_child(btn, 0);
-  lv_label_set_text(lbl, muted ? LV_SYMBOL_MUTE : LV_SYMBOL_VOLUME_MAX);
-  lv_obj_set_style_text_color(lbl, lv_color_hex(muted ? C_RED : C_LIGHT), 0);
-  if (Serial && Serial.availableForWrite() > 16) Serial.printf("MUTE_FONE %s\n", muted ? "on" : "off");
-}
-
-static void make_mic_btn(lv_obj_t *parent, int x) {
-  lv_obj_t *btn = lv_btn_create(parent);
-  style_btn(btn, x);
-  micImg = lv_img_create(btn);
-  lv_img_set_src(micImg, &img_mic);
-  lv_obj_center(micImg);
-  lv_obj_add_event_cb(btn, mic_event_cb, LV_EVENT_CLICKED, NULL);
-}
-
-static void make_fone_btn(lv_obj_t *parent, int x) {
-  lv_obj_t *btn = lv_btn_create(parent);
-  style_btn(btn, x);
-  lv_obj_t *lbl = lv_label_create(btn);
-  lv_label_set_text(lbl, LV_SYMBOL_VOLUME_MAX);
-  lv_obj_set_style_text_color(lbl, lv_color_hex(C_LIGHT), 0);
-  lv_obj_set_style_text_font(lbl, &lv_font_montserrat_20, 0);
-  lv_obj_center(lbl);
-  lv_obj_add_event_cb(btn, fone_event_cb, LV_EVENT_CLICKED, NULL);
-}
-
-void build_discord_ui() {
+void build_ui() {
   lv_obj_t *scr = lv_scr_act();
   lv_obj_set_style_bg_color(scr, lv_color_hex(C_BG), 0);
   lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
-  // Marca: logo REAL do Discord, grandona (cantos arredondados via clip)
   lv_obj_t *logo = lv_obj_create(scr);
   lv_obj_set_size(logo, 132, 132);
   lv_obj_align(logo, LV_ALIGN_TOP_MID, 0, 8);
   lv_obj_set_style_radius(logo, 30, 0);
   lv_obj_set_style_clip_corner(logo, true, 0);
-  lv_obj_set_style_bg_color(logo, lv_color_hex(C_BLURPLE), 0);
+  lv_obj_set_style_bg_color(logo, lv_color_hex(accent), 0);
   lv_obj_set_style_border_width(logo, 0, 0);
   lv_obj_set_style_pad_all(logo, 0, 0);
   lv_obj_clear_flag(logo, LV_OBJ_FLAG_SCROLLABLE);
@@ -204,39 +178,103 @@ void build_discord_ui() {
   lv_img_set_src(logoImg, &img_discord);
   lv_obj_center(logoImg);
 
-  // Fader HORIZONTAL (slider nativo touch)
-  lv_obj_t *slider = lv_slider_create(scr);
+  slider = lv_slider_create(scr);
   lv_obj_set_size(slider, 140, 24);
   lv_obj_align(slider, LV_ALIGN_TOP_MID, 0, 152);
   lv_slider_set_range(slider, 0, 100);
   lv_slider_set_value(slider, 72, LV_ANIM_OFF);
   lv_obj_set_style_bg_color(slider, lv_color_hex(C_TRACK), LV_PART_MAIN);
-  lv_obj_set_style_radius(slider, 13, LV_PART_MAIN);
-  lv_obj_set_style_bg_color(slider, lv_color_hex(C_BLURPLE), LV_PART_INDICATOR);
-  lv_obj_set_style_radius(slider, 13, LV_PART_INDICATOR);
+  lv_obj_set_style_radius(slider, 12, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(slider, lv_color_hex(accent), LV_PART_INDICATOR);
+  lv_obj_set_style_radius(slider, 12, LV_PART_INDICATOR);
   lv_obj_set_style_bg_color(slider, lv_color_hex(0xffffff), LV_PART_KNOB);
   lv_obj_set_style_pad_all(slider, 4, LV_PART_KNOB);
   lv_obj_add_event_cb(slider, slider_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
   lv_obj_add_event_cb(slider, slider_event_cb, LV_EVENT_RELEASED, NULL);
 
-  // Numero do volume (grandao)
   volLabel = lv_label_create(scr);
   lv_label_set_text(volLabel, "72");
   lv_obj_set_style_text_color(volLabel, lv_color_hex(0xffffff), 0);
   lv_obj_set_style_text_font(volLabel, &lv_font_montserrat_40, 0);
   lv_obj_align(volLabel, LV_ALIGN_TOP_MID, 0, 184);
 
-  // Botoes mute mic (imagem real) / fone (simbolo por enquanto)
-  make_mic_btn(scr, -36);
-  make_fone_btn(scr, 36);
+  micBtn = lv_btn_create(scr);
+  style_btn(micBtn, -36);
+  micImg = lv_img_create(micBtn);
+  lv_img_set_src(micImg, &img_mic);
+  lv_obj_center(micImg);
+  lv_obj_add_event_cb(micBtn, mic_event_cb, LV_EVENT_CLICKED, NULL);
+
+  foneBtn = lv_btn_create(scr);
+  style_btn(foneBtn, 36);
+  foneLbl = lv_label_create(foneBtn);
+  lv_label_set_text(foneLbl, LV_SYMBOL_VOLUME_MAX);
+  lv_obj_set_style_text_color(foneLbl, lv_color_hex(C_LIGHT), 0);
+  lv_obj_set_style_text_font(foneLbl, &lv_font_montserrat_20, 0);
+  lv_obj_center(foneLbl);
+  lv_obj_add_event_cb(foneBtn, fone_event_cb, LV_EVENT_CLICKED, NULL);
+}
+
+// ---- Aplica comandos do PC (sem gerar EV) ----
+void setStateBtn(lv_obj_t *btn, bool on) {
+  suppressEv = true;
+  if (on) lv_obj_add_state(btn, LV_STATE_CHECKED);
+  else lv_obj_clear_state(btn, LV_STATE_CHECKED);
+  lv_event_send(btn, LV_EVENT_CLICKED, NULL);  // atualiza icone/cor
+  suppressEv = false;
+}
+
+void applyColor(uint32_t rgb) {
+  accent = rgb;
+  lv_obj_set_style_bg_color(slider, lv_color_hex(accent), LV_PART_INDICATOR);
+}
+
+// ---- Parser de comandos serial ----
+static char lineBuf[96];
+static uint8_t lineLen = 0;
+
+void handleCommand(char *s) {
+  if (!strcmp(s, "PING")) { txln("PONG"); return; }
+
+  if (!strncmp(s, "VOL ", 4)) {
+    int v = constrain(atoi(s + 4), 0, 100);
+    suppressEv = true;
+    lv_slider_set_value(slider, v, LV_ANIM_OFF);
+    lv_label_set_text_fmt(volLabel, "%d", v);
+    suppressEv = false;
+    return;
+  }
+  if (!strncmp(s, "STATE ", 6)) {
+    char which[8]; int on = 0;
+    if (sscanf(s + 6, "%7s %d", which, &on) == 2) {
+      if (!strcmp(which, "mic")) setStateBtn(micBtn, on);
+      else if (!strcmp(which, "deaf")) setStateBtn(foneBtn, on);
+    }
+    return;
+  }
+  if (!strncmp(s, "COLOR ", 6)) {
+    uint32_t rgb = (uint32_t)strtol(s + 6, NULL, 16);
+    applyColor(rgb);
+    return;
+  }
+  // comandos desconhecidos: ignora
+}
+
+void pollSerial() {
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (lineLen > 0) { lineBuf[lineLen] = 0; handleCommand(lineBuf); lineLen = 0; }
+    } else if (lineLen < sizeof(lineBuf) - 1) {
+      lineBuf[lineLen++] = c;
+    }
+  }
 }
 
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\n[Modue] Tela Discord (LVGL)");
 
-  // Display
   if (!gfx->begin()) Serial.println("gfx->begin() FALHOU");
   lcd_reg_init();
   gfx->setRotation(0);
@@ -244,11 +282,9 @@ void setup() {
   pinMode(GFX_BL, OUTPUT);
   digitalWrite(GFX_BL, HIGH);
 
-  // Touch
   Wire.begin(TP_SDA, TP_SCL);
   bsp_touch_init(&Wire, TP_RST, TP_INT, gfx->getRotation(), gfx->width(), gfx->height());
 
-  // LVGL
   lv_init();
   uint32_t bufSize = 172 * 40;
   buf1 = (lv_color_t *)heap_caps_malloc(bufSize * 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -268,11 +304,12 @@ void setup() {
   indev_drv.read_cb = touchpad_read_cb;
   lv_indev_drv_register(&indev_drv);
 
-  build_discord_ui();
-  Serial.println("UI pronta. Arraste o fader e toque nos botoes.");
+  build_ui();
+  txln("HELLO modue " FW_VERSION);
 }
 
 void loop() {
+  pollSerial();
   lv_timer_handler();
   delay(5);
 }

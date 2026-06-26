@@ -12,6 +12,10 @@ build/
 .vscode/
 .idea/
 
+# Node (app do PC)
+node_modules/
+app/svcl.exe
+
 # Temp
 *.tmp
 *.log
