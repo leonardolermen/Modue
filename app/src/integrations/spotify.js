@@ -124,7 +124,8 @@ export class Spotify {
     });
     if (r.status === 401 && retry) { await this.refresh(); return this.api(method, path, { query, retry: false }); }
     if (r.status === 204) return null;            // nada tocando / sem conteúdo
-    if (r.status === 403) throw new Error("403 — precisa de Spotify Premium pra controlar.");
+    if (r.status === 403) throw new Error("403 — ação não permitida agora (restrição do Spotify, ex. sem device ativo ou estado já aplicado).");
+    if (r.status === 404) throw new Error("404 — nenhum device ativo. Abra o Spotify e dê play em algo.");
     if (!r.ok) throw new Error(`Spotify ${r.status} em ${path}`);
     const txt = await r.text();
     if (!txt) return null;

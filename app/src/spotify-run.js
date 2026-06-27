@@ -9,6 +9,9 @@ import { imageToRgb565 } from "./image.js";
 
 const ART_SIZE = 140; // casa com a area da capa no firmware
 
+// rede de seguranca: nunca derruba o app por um erro solto de API
+process.on("unhandledRejection", (e) => console.error("  ! (ignorado)", e.message));
+
 const __dir = dirname(fileURLToPath(import.meta.url));
 const cfg = JSON.parse(readFileSync(join(__dir, "..", "config.json"), "utf8"));
 
@@ -52,7 +55,7 @@ async function onEvent(line) {
   try {
     if (kind === "VOL") queueVolume(parseInt(a, 10));
     else if (kind === "BTN") {
-      if (a === "play") { (b === "1" ? sp.play() : sp.pause()); }
+      if (a === "play") { await (b === "1" ? sp.play() : sp.pause()); setTimeout(refresh, 400); }
       else if (a === "prev") { await sp.prev(); setTimeout(refresh, 400); }
       else if (a === "next") { await sp.next(); setTimeout(refresh, 400); }
       console.log(`  🎛️  ${a}${b ? " " + b : ""}`);

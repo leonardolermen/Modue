@@ -28,6 +28,8 @@ O firmware é um renderizador genérico **controlado pelo app de PC**: o módulo
 | RST | 22 | | | |
 | BL | 23 | | | |
 
+**Fader físico:** wiper do potenciômetro (10kΩ) → **GPIO3** (ADC1). Extremos no 3V3 e GND. Motor (ponte-H) ainda não ligado.
+
 > ⚠️ É a variante **Touch** (JD9853, não ST7789). O JD9853 precisa de sequência de init própria — ver `modue/`.
 
 ## Firmware (Arduino IDE)
@@ -51,11 +53,12 @@ Em `app/` (Node/Electron). Lê os eventos do módulo e aplica nos serviços (Dis
 - [x] UI em LVGL (logo, fader, botões mute)
 - [x] Ícones/logo reais no display
 - [x] Protocolo bidirecional + firmware dinâmico (Fase A)
-- [ ] Envio de imagem pro display (Fase B)
+- [x] Envio de imagem pro display (Fase B)
+- [x] Spotify — play/pause/skip + capa do álbum + volume (Web API)
+- [x] Fader físico (potenciômetro via ADC, auto-calibrado)
 - [ ] Shell do app Electron (Fase C)
 - [ ] Discord RPC nativo + estado de volta (Fase D)
-- [ ] Spotify — play/skip + capa do álbum (Fase E)
 - [ ] Multi-módulo + perfis (Fase F)
-- [ ] Fader motorizado + BLE
+- [ ] Fader motorizado (ponte-H) + BLE
 
 Documentação completa em [`claude.md`](claude.md).

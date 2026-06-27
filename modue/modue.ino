@@ -29,6 +29,11 @@ Arduino_GFX *gfx = new Arduino_ST7789(bus, 22, 0, false, 172, 320, 34, 0, 34, 0)
 #define TP_RST 20
 #define TP_INT 21
 
+// ---- Fader fisico (potenciometro do ALPS, via ADC) ----
+#define FADER_ENABLED 1   // 0 = desliga (use 0 enquanto NAO ligou o fader no GPIO3)
+#define FADER_DEBUG   0   // 1 = imprime o valor cru do ADC no serial (debug)
+#define FADER_PIN 3       // wiper do potenciometro -> ADC1_CH3
+
 // ---- Cores ----
 #define C_BG       0x0a0b10
 #define C_TRACK    0x1c1f29
@@ -421,6 +426,12 @@ void setup() {
   Serial.begin(115200);
   delay(300);
 
+#if FADER_ENABLED
+  // ADC: por padrao o ESP32 satura em ~1.1V. Com 12dB le o range ~0..3.3V.
+  analogReadResolution(12);
+  analogSetPinAttenuation(FADER_PIN, ADC_11db);
+#endif
+
   if (!gfx->begin()) Serial.println("gfx->begin() FALHOU");
   lcd_reg_init();
   gfx->setRotation(0);
@@ -454,10 +465,54 @@ void setup() {
   txln("HELLO modue " FW_VERSION);
 }
 
+#if FADER_ENABLED
+void readFader() {
+  static uint32_t last = 0;
+  if (millis() - last < 40) return;  // ~25 Hz
+  last = millis();
+  static float ema = -1;
+  int raw = analogRead(FADER_PIN);                 // 0..4095
+  ema = (ema < 0) ? raw : ema * 0.75f + raw * 0.25f;  // suaviza ruido
+
+  // Auto-calibracao: aprende os extremos do SEU fader conforme desliza o curso.
+  // Usa o valor suavizado (ema) p/ nao pegar pico de ruido, + margem nas pontas.
+  // Basta deslizar de ponta a ponta uma vez apos ligar.
+  int e = (int)ema;
+  static int rawMin = 4095, rawMax = 0;
+  if (e < rawMin) rawMin = e;
+  if (e > rawMax) rawMax = e;
+  int lo = rawMin + 40, hi = rawMax - 40;  // margem: garante 0 e 100 nas pontas
+  int v = (hi - lo > 100)
+            ? constrain((int)((long)(e - lo) * 100L / (hi - lo)), 0, 100)
+            : 50;  // ate calibrar, fica no meio
+
+#if FADER_DEBUG
+  static uint32_t dbg = 0;
+  if (millis() - dbg > 250) {
+    dbg = millis();
+    char b[48]; snprintf(b, sizeof(b), "DBG fader raw=%d ema=%d vol=%d", raw, (int)ema, v);
+    txln(b);
+  }
+#endif
+  static int lastV = -1;
+  if (lastV < 0 || abs(v - lastV) >= 2) {          // deadband anti-jitter
+    lastV = v;
+    suppressEv = true;
+    if (slider) lv_slider_set_value(slider, v, LV_ANIM_OFF);
+    if (volLabel) lv_label_set_text_fmt(volLabel, "%d", v);
+    suppressEv = false;
+    char b[16]; snprintf(b, sizeof(b), "EV VOL %d", v); txln(b);
+  }
+}
+#endif
+
 void loop() {
   pollSerial();
   // Enquanto recebe a imagem, drena rapido (sem desenhar) pra nao perder bytes.
   if (imgRemaining > 0) return;
+#if FADER_ENABLED
+  readFader();
+#endif
   lv_timer_handler();
   delay(5);
 }
