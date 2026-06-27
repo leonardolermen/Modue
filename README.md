@@ -28,7 +28,16 @@ O firmware é um renderizador genérico **controlado pelo app de PC**: o módulo
 | RST | 22 | | | |
 | BL | 23 | | | |
 
-**Fader físico:** wiper do potenciômetro (10kΩ) → **GPIO3** (ADC1). Extremos no 3V3 e GND. Motor (ponte-H) ainda não ligado.
+**Fader físico** (potenciômetro 10kΩ, Donghong 119C 10KB — wiper no ADC1):
+
+| Pino do fader | Liga em |
+|---|---|
+| 1 | 3.3V |
+| 3 (wiper) | GPIO3 |
+| 4 | GND |
+| 2 | não usado |
+
+> Motor (ponte-H) ainda não ligado. A leitura tem auto-calibração: deslize o curso completo uma vez após ligar.
 
 > ⚠️ É a variante **Touch** (JD9853, não ST7789). O JD9853 precisa de sequência de init própria — ver `modue/`.
 

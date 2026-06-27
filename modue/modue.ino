@@ -466,25 +466,32 @@ void setup() {
 }
 
 #if FADER_ENABLED
+// Curva de calibracao DESTE fader (mV medido -> % de posicao fisica).
+// Linearia o taper torto: interpola entre os pontos medidos.
+int faderCurve(int mv) {
+  static const int MV[]  = {8, 581, 1134, 1481, 2915};  // mV em cada posicao
+  static const int POS[] = {0,  25,   50,   75,  100};  // % fisico correspondente
+  const int N = 5;
+  if (mv <= MV[0]) return 0;
+  if (mv >= MV[N - 1]) return 100;
+  for (int i = 1; i < N; i++) {
+    if (mv <= MV[i]) {
+      return POS[i - 1] + (int)((long)(mv - MV[i - 1]) * (POS[i] - POS[i - 1]) / (MV[i] - MV[i - 1]));
+    }
+  }
+  return 100;
+}
+
 void readFader() {
   static uint32_t last = 0;
   if (millis() - last < 40) return;  // ~25 Hz
   last = millis();
   static float ema = -1;
-  int raw = analogRead(FADER_PIN);                 // 0..4095
+  int raw = analogReadMilliVolts(FADER_PIN);       // mV calibrado (linear, ~0..3300)
   ema = (ema < 0) ? raw : ema * 0.75f + raw * 0.25f;  // suaviza ruido
 
-  // Auto-calibracao: aprende os extremos do SEU fader conforme desliza o curso.
-  // Usa o valor suavizado (ema) p/ nao pegar pico de ruido, + margem nas pontas.
-  // Basta deslizar de ponta a ponta uma vez apos ligar.
-  int e = (int)ema;
-  static int rawMin = 4095, rawMax = 0;
-  if (e < rawMin) rawMin = e;
-  if (e > rawMax) rawMax = e;
-  int lo = rawMin + 40, hi = rawMax - 40;  // margem: garante 0 e 100 nas pontas
-  int v = (hi - lo > 100)
-            ? constrain((int)((long)(e - lo) * 100L / (hi - lo)), 0, 100)
-            : 50;  // ate calibrar, fica no meio
+  // Aplica a curva de calibracao -> volume linear com a posicao fisica
+  int v = faderCurve((int)ema);
 
 #if FADER_DEBUG
   static uint32_t dbg = 0;
