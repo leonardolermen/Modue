@@ -18,6 +18,11 @@ node_modules/
 app/.spotify-tokens.json
 app/svcl.exe
 
+# Case (render/export do OpenSCAD)
+case/*.png
+case/*.stl
+case/*.3mf
+
 # Temp
 *.tmp
 *.log

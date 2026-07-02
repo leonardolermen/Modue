@@ -10,6 +10,8 @@ Controlador físico modular para PC que controla individualmente o volume de apl
 
 O firmware é um renderizador genérico **controlado pelo app de PC**: o módulo recebe comandos (volume, estado, cor, imagens) e devolve eventos de toque. Detalhes em [`docs/architecture.md`](docs/architecture.md) e o contrato em [`PROTOCOL.md`](PROTOCOL.md).
 
+> 🛠️ **Rodar do zero numa máquina nova:** ver [`SETUP.md`](SETUP.md) (Arduino/libs, app Node, OpenSCAD, git).
+
 ## Hardware
 
 - **MCU + Display:** ESP32-C6-Touch-LCD-1.47 (SpotPear/Waveshare) — display **JD9853** 172×320 + touch **AXS5106L**
